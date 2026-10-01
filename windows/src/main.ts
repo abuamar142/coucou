@@ -23,8 +23,6 @@ async function main() {
   island.applySettings();
   State.loadIntegrationTasks();
 
-  await onEvent<{ x: number; y: number }>("cursor", ({ x, y }) => island.onCursor(x, y));
-
   /** Pause has to reach Rust too, or the pollers keep calling out. */
   const setPaused = (on: boolean) => {
     if (State.paused === on) return;
@@ -62,6 +60,10 @@ async function main() {
 
   registerHookHandlers(island);
   registerIntegrationHandlers(island);
+
+  // Proof of life: the island's JavaScript ran to the end of boot. Rust's log
+  // is the only place both sides can be seen on the same timeline.
+  void Bridge.log("ui main() complete");
 
   island.launch();
 

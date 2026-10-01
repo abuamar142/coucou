@@ -47,24 +47,35 @@ impl Default for Settings {
     }
 }
 
-/// %APPDATA%\Coucou
+/// ~/.config/coucou — plain JSON, no secrets.
 pub fn config_dir() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
+    let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("Coucou")
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+            home.join(".config")
+        });
+    base.join("coucou")
 }
 
-/// %LOCALAPPDATA%\Coucou — where coucou-hook.exe and the log live.
+/// ~/.local/share/coucou — where the log lives.
 pub fn local_dir() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA")
+    let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("Coucou")
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+            home.join(".local").join("share")
+        });
+    base.join("coucou")
 }
 
-pub fn hook_exe_path() -> PathBuf {
-    local_dir().join("bin").join("coucou-hook.exe")
+/// The OMP hook the relay lives in: a TypeScript factory omp discovers at
+/// `<agentDir>/hooks/post/*.ts` (default ~/.omp/agent/hooks/post/).
+pub fn omp_hook_path() -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    home.join(".omp").join("agent").join("hooks").join("post").join("coucou-relay.ts")
 }
 
 fn settings_path() -> PathBuf {

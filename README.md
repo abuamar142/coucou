@@ -135,6 +135,63 @@ The macOS app is native Swift 6 / SwiftUI / AppKit with **zero third-party depen
 - Claude Code hooks go through a tiny `coucou-hook.exe` and a named pipe; keys live in Windows Credential Manager.
 - Details and differences in [`windows/README.md`](windows/README.md).
 
+## Linux (CachyOS fork)
+
+This fork (`abuamar142/coucou`) targets **Linux/KDE** and monitors **[omp](https://omp.sh)**
+sessions instead of Claude Code. The macOS and Windows-specific code paths
+(Swift notch app, `coucou-hook.exe`, named pipes, the Win32 cursor poll) are
+not built here; upstream remains the source for those platforms.
+
+**Status: MVP monitor.** Verified on CachyOS, KDE Plasma 6 (Wayland), omp 18.4.4.
+
+| Works | Not yet |
+| --- | --- |
+| Island, Mochi, tray, settings window | Approve/deny from the island (the decision stays in the terminal; the island only shows that omp is waiting) |
+| Live session events (start, prompt, tools, stop) | Per-session task rows (all sessions share one row) |
+| Chat (own Anthropic key), integration pills | The app does not install the KWin rule itself |
+| Hook install with preview/backup/fingerprint | macOS/Windows builds of *this* fork |
+
+```bash
+cd windows
+npm install
+npx tauri dev        # or: npm run pack (deb bundle)
+```
+
+**OMP hook:** Settings → OMP → *Install hook* writes
+`~/.omp/agent/hooks/post/coucou-relay.ts` (backup + exact diff first). New omp
+sessions pick it up; running ones keep their old state. The relay is
+fire-and-forget over `$XDG_RUNTIME_DIR/coucou.sock` with a 300 ms budget — a
+closed Coucou costs the session exactly one dropped event.
+
+**Wayland placement:** a Wayland client cannot position its own window, so the
+compositor does it. The island is pinned top-centre (below the panel) and kept
+above other windows by a KWin rule — `~/.config/kwinrulesrc`:
+
+```ini
+[General]
+count=1
+rules=coucou-island
+
+[coucou-island]
+Description=Coucou island — top center, always above
+wmclass=coucou
+wmclassmatch=2
+above=true
+aboverule=2
+position=512,32
+positionrule=2
+```
+
+`512,32` assumes a 1746-logical-px wide screen with a 32 px top panel (the
+720-px island centred: `(1746-720)/2 = 512`). Recompute for your resolution:
+`x = (logical_screen_width - 720) / 2`, `y = panel_height`. Apply with
+`gdbus call --session --dest org.kde.KWin --object-path /KWin --method org.kde.KWin.reconfigure`.
+
+**Honest Wayland differences from the Windows build:** no global cursor (eyes
+follow the pointer inside the window only, from DOM mouse events), no
+click-through shape test (the window rect takes the mouse), and the "Display
+under the cursor" setting falls back to the primary display.
+
 ## Contributing
 
 Issues and PRs are very welcome — new integrations, new emotes, new sounds, bug fixes. See [CONTRIBUTING.md](CONTRIBUTING.md).

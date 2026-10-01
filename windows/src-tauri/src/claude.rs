@@ -4,7 +4,7 @@
 // Everything happens here rather than in the island: the API key never leaves
 // the Credential Manager, and file bytes never cross the IPC boundary.
 
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -35,23 +35,23 @@ pub struct Chat {
 
 impl Chat {
     pub fn reset(&self) {
-        self.messages.lock().unwrap().clear();
+        self.messages.lock().clear();
     }
 
     fn is_empty(&self) -> bool {
-        self.messages.lock().unwrap().is_empty()
+        self.messages.lock().is_empty()
     }
 
     fn push(&self, message: Value) {
-        self.messages.lock().unwrap().push(message);
+        self.messages.lock().push(message);
     }
 
     fn pop(&self) {
-        self.messages.lock().unwrap().pop();
+        self.messages.lock().pop();
     }
 
     fn snapshot(&self) -> Vec<Value> {
-        self.messages.lock().unwrap().clone()
+        self.messages.lock().clone()
     }
 }
 

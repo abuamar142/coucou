@@ -1,4 +1,4 @@
-// Coucou for Windows — app wiring and the commands the island calls.
+// Coucou for Linux — app wiring and the commands the island calls.
 
 mod claude;
 mod files;
@@ -10,12 +10,12 @@ mod pipe;
 mod secrets;
 mod settings;
 mod tray;
-mod win_user;
 
-use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -27,9 +27,6 @@ use hooks::{HookPreview, HookStatus};
 use island::{PollGate, ScreenInfo};
 use pipe::Pending;
 use settings::Settings;
-
-/// Keeps spawned helpers from flashing a console window.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct Shared {
     pub settings: Mutex<Settings>,
@@ -47,22 +44,22 @@ pub struct BootInfo {
 
 #[tauri::command]
 fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
-    let mut settings = shared.settings.lock().unwrap().clone();
-    // The real state of ~/.claude/settings.json wins over whatever we stored.
+    let mut settings = shared.settings.lock().clone();
+    // The real state of the omp hook file wins over whatever we stored.
     settings.hooks_installed = hooks::status().installed;
     let screen = island::screen_info(&app, &settings.screen);
     BootInfo {
         settings,
         screen,
         version: env!("CARGO_PKG_VERSION").to_string(),
-        hook_path: settings::hook_exe_path().to_string_lossy().to_string(),
+        hook_path: settings::omp_hook_path().to_string_lossy().to_string(),
     }
 }
 
 #[tauri::command]
 fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     let (screen_changed, autostart_changed) = {
-        let mut current = shared.settings.lock().unwrap();
+        let mut current = shared.settings.lock();
         let screen_changed = current.screen != settings.screen;
         let autostart_changed = current.autostart != settings.autostart;
         *current = settings.clone();
@@ -86,29 +83,24 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     let _ = app.emit("settings-changed", settings);
 }
 
-/// Hidden island → shrink the window to the invisible wake strip and park the
-/// cursor poll; anything else → full panel and 60 Hz polling.
+/// Hidden island → shrink the window to the invisible wake strip; anything else
+/// → full panel.
 #[tauri::command]
 fn set_collapsed(app: AppHandle, shared: State<Shared>, collapsed: bool) {
-    let pref = shared.settings.lock().unwrap().screen.clone();
-    shared.gate.collapsed.store(collapsed, Ordering::Relaxed);
+    let pref = shared.settings.lock().screen.clone();
+    shared.gate.set_collapsed(collapsed);
     island::apply_geometry(&app, &pref, collapsed);
-    // The wake strip must always take the mouse, and a resize invalidates the flag.
-    island::set_ignore_cursor(&app, false);
-    shared.gate.forget_ignore_state();
-    shared.gate.set_active(!collapsed);
-}
-
-/// The front end pushes the island shape; Rust decides click-through from it.
-#[tauri::command]
-fn set_island_rect(shared: State<Shared>, x: f64, y: f64, width: f64, height: f64) {
-    shared.gate.set_rect(island::IslandRect { x, y, w: width, h: height });
+    log::line(format!(
+        "geometry {}",
+        if collapsed { "strip (collapsed)" } else { "panel (expanded)" }
+    ));
 }
 
 #[tauri::command]
 fn focus_window(app: AppHandle, focused: bool) {
+    // Wayland/KWin: focus is granted on an explicit request only. The island
+    // asks for it when a text field inside must type, and lets it go otherwise.
     let Some(win) = island::window(&app) else { return };
-    island::set_activating(&win, focused);
     if focused {
         let _ = win.set_focus();
     }
@@ -116,7 +108,7 @@ fn focus_window(app: AppHandle, focused: bool) {
 
 #[tauri::command]
 fn reposition(app: AppHandle, shared: State<Shared>) {
-    let pref = shared.settings.lock().unwrap().screen.clone();
+    let pref = shared.settings.lock().screen.clone();
     let collapsed = shared.gate.collapsed.load(Ordering::Relaxed);
     island::apply_geometry(&app, &pref, collapsed);
 }
@@ -126,47 +118,43 @@ fn open_url(url: String) {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return;
     }
-    let _ = Command::new("rundll32.exe")
-        .args(["url.dll,FileProtocolHandler", &url])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
+    let _ = Command::new("xdg-open").arg(&url).spawn();
 }
 
 /// "Open terminal" opens the working folder in VS Code when `code` is on PATH,
-/// and falls back to Explorer otherwise.
+/// and falls back to the file manager otherwise.
 #[tauri::command]
 fn open_in_vscode(path: Option<String>) -> bool {
-    // No `cmd /C` anywhere near this. The path is a project folder chosen by
-    // whoever is using Claude Code, and cmd would happily read `&`, `^` and `%`
-    // in a folder name as syntax. Finding the launcher ourselves and handing the
-    // path over as a separate argument keeps it a path.
+    // The path is a project folder chosen by whoever is using the agent. We
+    // find the launcher ourselves and hand the path over as a separate
+    // argument, so nothing in the folder name is ever shell syntax.
     if let Some(code) = find_on_path("code") {
         let mut cmd = Command::new(code);
         if let Some(p) = path.as_deref().filter(|p| !p.is_empty()) {
             cmd.arg(p);
         }
-        if cmd.creation_flags(CREATE_NO_WINDOW).spawn().is_ok() {
+        if cmd.spawn().is_ok() {
             return true;
         }
     }
     if let Some(p) = path.as_deref().filter(|p| !p.is_empty()) {
-        let _ = Command::new("explorer").arg(p).spawn();
+        let _ = Command::new("xdg-open").arg(p).spawn();
     }
     false
 }
 
-/// Our own `where`: walks %PATH% against %PATHEXT%, no shell involved.
-/// Rust quotes arguments correctly for `.cmd`/`.bat` targets since 1.77, so
-/// spawning `code.cmd` directly is safe.
+/// Our own `which`: walks %PATH%, requires the executable bit, no shell involved.
 fn find_on_path(stem: &str) -> Option<std::path::PathBuf> {
-    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    use std::os::unix::fs::PermissionsExt;
     let dirs = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&dirs) {
-        for ext in exts.split(';').filter(|e| !e.is_empty()) {
-            let candidate = dir.join(format!("{stem}{}", ext.to_lowercase()));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+        let candidate = dir.join(stem);
+        if candidate.is_file()
+            && std::fs::metadata(&candidate)
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        {
+            return Some(candidate);
         }
     }
     None
@@ -184,7 +172,7 @@ fn set_paused(paused: bool) {
     integrations::set_paused(paused);
 }
 
-// ── Claude Code hooks ─────────────────────────────────────────────────────────
+// ── OMP hooks ─────────────────────────────────────────────────────────
 
 #[tauri::command]
 fn hooks_status() -> HookStatus {
@@ -209,7 +197,7 @@ fn hooks_apply(
     // settings.json that changed in between is refused rather than overwritten.
     let backup = hooks::write(install, &fingerprint)?;
     let updated = {
-        let mut current = shared.settings.lock().unwrap();
+        let mut current = shared.settings.lock();
         current.hooks_installed = install;
         let _ = settings::save(&current);
         current.clone()
@@ -225,14 +213,14 @@ fn approval_decision(app: AppHandle, request_id: String, decision: String) {
 
 /// The island has the card on screen, so the long wait for a human may begin.
 /// Until this arrives the relay only waits a few hundred milliseconds, which is
-/// what stops a paused or unresponsive island from freezing Claude Code.
+/// what stops a paused or unresponsive island from freezing the session.
 #[tauri::command]
 fn approval_ack(app: AppHandle, request_id: String) {
     pipe::acknowledge(&app, &request_id);
 }
 
 /// Nobody can act on this request — the island is paused, or another card is
-/// already up. Claude Code falls back to asking in the terminal immediately.
+/// already up. omp falls back to asking in the terminal immediately.
 #[tauri::command]
 fn approval_decline(app: AppHandle, request_id: String) {
     pipe::decline(&app, &request_id);
@@ -248,7 +236,7 @@ async fn chat_send(
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
-    let model = shared.settings.lock().unwrap().model.clone();
+    let model = shared.settings.lock().model.clone();
     claude::send(&chat, &model, query, context).await
 }
 
@@ -301,13 +289,6 @@ fn log_line(message: String) {
 
 // ── Settings window ───────────────────────────────────────────────────────────
 
-/// WebView2 allows exactly one browser environment per app, and its options are
-/// fixed by whichever webview is created first. Every window must therefore ask
-/// for the *same* arguments as the island (see `additionalBrowserArgs` in
-/// tauri.conf.json) — a mismatch makes the second window come up blank, with no
-/// error anywhere.
-const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required";
-
 /// In a dev build the pages are served by Vite, so the second window needs the
 /// absolute dev URL; a bundled build resolves it inside the app bundle.
 fn settings_page_url(app: &AppHandle) -> WebviewUrl {
@@ -321,13 +302,12 @@ fn settings_page_url(app: &AppHandle) -> WebviewUrl {
 }
 
 /// The settings window is created hidden at launch and only ever shown and
-/// hidden afterwards. A WebView2 window created later — on the main thread or
-/// not — silently comes up blank in this app, so the window that works is the
-/// one that exists before the island's webview does.
+/// hidden afterwards. On this platform that is a preference, not a WebView2
+/// workaround — but the window that exists before the island's webview does is
+/// still the one that works, so the order stays.
 fn create_settings_window(app: &AppHandle) {
     let url = settings_page_url(app);
     match WebviewWindowBuilder::new(app, "settings", url)
-        .additional_browser_args(BROWSER_ARGS)
         .title("Settings — Coucou")
         .inner_size(560.0, 680.0)
         .min_inner_size(460.0, 480.0)
@@ -384,7 +364,6 @@ pub fn run() {
             boot,
             save_settings,
             set_collapsed,
-            set_island_rect,
             focus_window,
             reposition,
             open_url,
@@ -415,16 +394,33 @@ pub fn run() {
             create_settings_window(&handle);
 
             if let Some(win) = island::window(&handle) {
-                island::make_non_activating(&win);
                 island::apply_geometry(&handle, &loaded.screen, false);
                 let _ = win.show();
+                // Self-report for the log. On Wayland the compositor owns
+                // placement (see the KWin rule in README): `pos` is only what
+                // the client last asked for and can read (0,0) while the
+                // window sits exactly where it should — trust KWin's view
+                // over this number. `size` and `visible` are reliable.
+                let pos = win
+                    .outer_position()
+                    .map(|p| format!("({}, {})", p.x, p.y))
+                    .unwrap_or_else(|e| format!("unknown ({e})"));
+                let size = win
+                    .inner_size()
+                    .map(|s| format!("{}x{}", s.width, s.height))
+                    .unwrap_or_else(|e| format!("unknown ({e})"));
+                log::line(format!(
+                    "island visible={} clientPos={} size={} alwaysOnTop={}",
+                    win.is_visible().unwrap_or(false),
+                    pos,
+                    size,
+                    win.is_always_on_top().unwrap_or(false)
+                ));
             }
-            gate.collapsed.store(false, Ordering::Relaxed);
-            gate.set_active(true);
-            island::spawn_cursor_poll(handle.clone(), gate.clone());
+            gate.set_collapsed(false);
+            island::spawn_screen_watch(handle.clone());
 
             log::line(format!("--- Coucou {} started ---", env!("CARGO_PKG_VERSION")));
-            hooks::ensure_hook_exe(&handle);
             pipe::start(handle.clone());
             integrations::start(handle.clone());
             Ok(())

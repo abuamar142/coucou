@@ -2,7 +2,7 @@
 // Mirrors IslandRootView.swift + IslandWindowController.swift.
 
 import { Tracked, Spring, clamp } from "../core/anim";
-import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
+import { Bridge, onDragDrop } from "../core/bridge";
 import {
   EXPANDED_CORNER, EXPANDED_W, NOTCH_W, PANEL_H, PANEL_W,
   ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
@@ -70,8 +70,6 @@ export class Island {
   private collapsed = false;
   private collapseTimer: number | null = null;
   private wasInIsland = false;
-  /** Last shape handed to Rust for the click-through test. */
-  private pushedRect = { x: -1, y: -1, w: -1, h: -1 };
   private homeCollapseAt: number | null = null;
 
   // Bot hover → love (IslandWindowController.botHoverIn)
@@ -483,13 +481,6 @@ export class Island {
     this.miniGrid.style.top = `${hh / 2 - 14.5}px`;
     this.greetingCanvas.style.left = `${(w - EXPANDED_W) / 2}px`;
     this.uploadCanvas.el.style.left = `${(w - EXPANDED_W) / 2}px`;
-
-    const rect = { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
-    const p = this.pushedRect;
-    if (Math.abs(p.x - rect.x) > 0.5 || Math.abs(p.w - rect.w) > 0.5 || Math.abs(p.h - rect.h) > 0.5) {
-      this.pushedRect = rect;
-      void Bridge.setIslandRect(rect.x, rect.y, rect.w, rect.h);
-    }
   }
 
   /** Island rect in window coordinates (origin top-left of the 720×320 window). */
@@ -551,11 +542,10 @@ export class Island {
 
     void onDragDrop((e) => this.onDragDrop(e));
 
-    // Outside Tauri (plain browser) drive the cursor from DOM events so the
-    // island can be inspected with `npm run dev`.
-    if (!IS_TAURI) {
-      window.addEventListener("mousemove", (e) => this.onCursor(e.clientX, e.clientY));
-    }
+    // The island reads its own pointer position from DOM mouse events. There is
+    // no global cursor to subscribe to on Wayland, and inside the window the
+    // two are the same coordinate space (window-logical).
+    window.addEventListener("mousemove", (e) => this.onCursor(e.clientX, e.clientY));
   }
 
   /** Cursor in window-logical coordinates. */

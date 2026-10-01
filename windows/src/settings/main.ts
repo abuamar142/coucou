@@ -1,5 +1,5 @@
 // Settings window — the place where anything that writes to disk is confirmed.
-// Stage 2 covers the Claude Code hooks and the general preferences; API keys and
+// Stage 2 covers the omp hook and the general preferences; API keys and
 // integrations land here too in a later stage.
 
 import "./settings.css";
@@ -41,14 +41,14 @@ function renderDiff(text: string): HTMLElement {
   return box;
 }
 
-// ── Claude Code section ───────────────────────────────────────────────────────
+// ── OMP section ───────────────────────────────────────────────────────────────
 
-function claudeSection(status: HookStatus): HTMLElement {
+function ompSection(status: HookStatus): HTMLElement {
   const body = h("div", { style: "display:flex;flex-direction:column;gap:12px" });
   const section = h(
     "section",
     {},
-    h("h2", {}, statusDot(status.installed), h("span", { text: "Claude Code" })),
+    h("h2", {}, statusDot(status.installed), h("span", { text: "OMP" })),
     body,
   );
 
@@ -59,7 +59,7 @@ function claudeSection(status: HookStatus): HTMLElement {
     draw();
     const head = section.querySelector("h2")!;
     clear(head);
-    head.append(statusDot(status.installed), h("span", { text: "Claude Code" }));
+    head.append(statusDot(status.installed), h("span", { text: "OMP" }));
   };
 
   function draw() {
@@ -67,15 +67,11 @@ function claudeSection(status: HookStatus): HTMLElement {
       h("div", {
         class: "hint",
         text: status.installed
-          ? "Coucou is hooked into your Claude Code sessions. Tool calls, questions and permission requests show up in the island, and you can answer them there."
-          : "Install the hooks to see your Claude Code sessions in the island and approve permissions without leaving what you are doing.",
+          ? "Coucou is hooked into your omp sessions. Tool calls, prompts and questions show up in the island while they happen."
+          : "Install the hook to see your omp sessions in the island as they work.",
       }),
       h("div", { class: "row" },
-        h("label", { text: "settings.json" }),
-        h("span", { class: "path", text: status.settingsPath }),
-      ),
-      h("div", { class: "row" },
-        h("label", { text: "Relay" }),
+        h("label", { text: "Hook file" }),
         h("span", { class: "path", text: status.hookPath }),
         statusDot(status.hookReady),
       ),
@@ -84,21 +80,21 @@ function claudeSection(status: HookStatus): HTMLElement {
     if (!status.hookReady) {
       body.append(h("div", {
         class: "notice warn",
-        text: "coucou-hook.exe is not in place yet. Restart Coucou; if it still fails, build it with `cargo build -p coucou-hook`.",
+        text: "omp has no agent directory yet (~/.omp/agent). Run omp once, then come back and install.",
       }));
     }
 
     const actions = h("div", { class: "row" });
     const install = h("button", {
       class: "primary",
-      text: status.installed ? "Reinstall hooks…" : "Install hooks…",
+      text: status.installed ? "Reinstall hook…" : "Install hook…",
       onclick: () => showPreview(true),
     });
-    // Writing hook commands that point at a relay which isn't there would give
-    // every Claude Code session a broken hook and nothing to show for it.
+    // Installing a hook file into an agent directory that does not exist yet
+    // would leave it undiscovered — gate the button on omp having run.
     if (!status.hookReady) {
       install.disabled = true;
-      install.title = "The relay isn't installed yet.";
+      install.title = "omp is not set up on this machine yet.";
     }
     actions.append(install);
     if (status.installed) {
@@ -116,8 +112,8 @@ function claudeSection(status: HookStatus): HTMLElement {
     try {
       preview = await Bridge.hooksPreview(install);
     } catch (err) {
-      // An unreadable or invalid settings.json stops here rather than being
-      // treated as empty and written over.
+      // An unreadable hook file stops here rather than being treated as
+      // empty and written over.
       clear(body);
       body.append(
         h("div", { class: "notice err", text: String(err).replace(/^Error:\s*/, "") }),
@@ -134,8 +130,8 @@ function claudeSection(status: HookStatus): HTMLElement {
       h("div", {
         class: "hint",
         text: install
-          ? "This is exactly what will change in your settings.json. Your own hooks are left untouched."
-          : "This removes Coucou's entries only. Your own hooks are left untouched.",
+          ? "This is exactly what will be written to the hook file. An existing copy is backed up first."
+          : "This removes Coucou's relay file only. Anything else in your hooks directory is left untouched.",
       }),
       renderDiff(preview.diff),
       h("div", { class: "row" },
@@ -153,7 +149,9 @@ function claudeSection(status: HookStatus): HTMLElement {
         clear(body);
         body.append(h("div", {
           class: "notice ok",
-          text: `Done. Previous settings saved as ${backup}. Open a new Claude Code session to pick the hooks up.`,
+          text: backup
+            ? `Done. Previous version saved as ${backup}. Open a new omp session to pick the hook up.`
+            : "Done. Open a new omp session to pick the hook up.",
         }));
         window.setTimeout(() => void rebuild(), 2600);
       } catch (err) {
@@ -441,7 +439,7 @@ async function main() {
   clear(root);
   root.append(
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
-    claudeSection(status),
+    ompSection(status),
     apiSection(hasKey),
     integrationsSection(present),
     generalSection(),

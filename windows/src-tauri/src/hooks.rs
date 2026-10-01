@@ -1,44 +1,29 @@
-// Claude Code hook installation.
+// OMP hook installation.
 //
-// The rule from CLAUDE.md is strict and is followed to the letter:
-// read %USERPROFILE%\.claude\settings.json, take a dated backup, merge without
-// touching anybody else's hooks, show the diff, and write only after an explicit
-// click. Uninstall removes Coucou's entries and nothing else.
-//
-// The command is only the quoted exe path in forward slashes plus the event name:
-// on Windows Claude Code runs hook commands through Git Bash, and anything with
-// PowerShell or cmd in it breaks.
+// The relay is a single TypeScript factory omp discovers at
+// ~/.omp/agent/hooks/post/coucou-relay.ts (ambient discovery scans
+// <agentDir>/hooks/pre|post/*.ts — see docs/hooks.md in the omp repo). There is
+// no JSON to merge: the file is Coucou's by construction, so the contract is
+// simpler than the Claude Code installer this replaced — read the target, take
+// a dated backup, show the exact bytes that will change, write only after an
+// explicit click, and refuse to touch a file we did not write.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Serialize;
-use serde_json::{json, Map, Value};
-use tauri::{AppHandle, Manager};
-use windows::Win32::System::SystemInformation::GetLocalTime;
 
 use crate::settings;
 
-/// Every event the island reacts to, with the hook timeout written to settings.json.
-/// PermissionRequest waits for a human, so it gets the decision timeout + 10 s.
-pub const HOOK_EVENTS: &[(&str, u64)] = &[
-    ("SessionStart", 10),
-    ("SessionEnd", 10),
-    ("UserPromptSubmit", 10),
-    ("PreToolUse", 10),
-    ("PostToolUse", 10),
-    ("PostToolUseFailure", 10),
-    ("PermissionRequest", 120),
-    ("Notification", 10),
-    ("Stop", 10),
-    ("StopFailure", 10),
-    ("SubagentStart", 10),
-    ("SubagentStop", 10),
-];
+/// The header line of every relay we write. A file at the same path without
+/// the marker is somebody else's: never overwritten, never removed.
+const MARKER: &str = "coucou-relay v1";
 
-/// Marker that identifies a Coucou entry inside settings.json.
-const MARKER: &str = "coucou-hook";
+/// The relay itself, compiled into the binary. include_str! removes the whole
+/// "find the resource at runtime" failure mode the old hook exe had — there is
+/// no path to guess, no copy step to go silently wrong.
+const RELAY: &str = include_str!("coucou-relay.ts");
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct HookStatus {
     pub installed: bool,
@@ -47,166 +32,57 @@ pub struct HookStatus {
     pub hook_ready: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct HookPreview {
     pub diff: String,
     pub backup: String,
     pub settings_path: String,
-    /// Identifies the bytes this diff was computed from; handed back to `write`
-    /// so we only ever apply what the user actually looked at.
+    /// Identifies the exact bytes this diff was computed from; handed back to
+    /// `write` so we only ever apply what the user actually looked at.
     pub fingerprint: String,
 }
 
-fn home() -> PathBuf {
-    std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+fn hook_path() -> PathBuf {
+    settings::omp_hook_path()
 }
 
-pub fn settings_path() -> PathBuf {
-    home().join(".claude").join("settings.json")
+/// True when the file at the relay path was written by somebody other than us.
+/// An absent (empty) file is not foreign — there is simply nothing there yet.
+fn foreign(text: &str) -> bool {
+    !text.is_empty() && !text.contains(MARKER)
 }
 
-/// Reads `~/.claude/settings.json`.
+/// Reads the relay file.
 ///
 /// The only error that means "start from nothing" is the file not being there.
-/// Everything else — a lock held by another process, a permission problem, JSON
-/// we cannot parse — is reported, because the alternative is treating somebody's
-/// unreadable settings as an empty object and then writing that back over them.
-fn read_settings() -> Result<Value, String> {
-    let path = settings_path();
+/// Everything else — a permission problem, invalid UTF-8 — is reported, because
+/// the alternative is treating somebody's unreadable file as empty and then
+/// writing over it.
+fn read_relay() -> Result<String, String> {
+    let path = hook_path();
     match std::fs::read(&path) {
-        Ok(bytes) => parse_settings(&bytes, &path.display().to_string()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
-        // A lock, a permission problem, a bad drive: all of them mean we do not
-        // know what is in there, and not knowing is not the same as empty.
+        Ok(bytes) => String::from_utf8(bytes)
+            .map_err(|_| format!("{} isn't UTF-8 — Coucou won't touch it.", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(err) => Err(format!("Can't read {}: {err}", path.display())),
     }
 }
 
-/// The parsing half of `read_settings`, split out so it can be tested without a
-/// home directory.
-fn parse_settings(bytes: &[u8], path: &str) -> Result<Value, String> {
-    // PowerShell writes a UTF-8 BOM with `Set-Content -Encoding utf8`, and
-    // serde_json refuses it. Stripping it is safe and well defined; guessing at
-    // anything else is not.
-    let text = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
-    if text.iter().all(u8::is_ascii_whitespace) {
-        return Ok(json!({}));
-    }
-    match serde_json::from_slice::<Value>(text) {
-        Ok(v) if v.is_object() => Ok(v),
-        Ok(_) => Err(format!("{path} isn't a JSON object — Coucou won't touch it.")),
-        Err(err) => Err(format!(
-            "{path} isn't valid JSON ({err}). Fix or move it, then try again — Coucou won't overwrite it."
-        )),
-    }
-}
-
-/// The settings as they are, or an empty object when we cannot tell. Only for
-/// read-only paths like `status()`, which must never fail loudly; anything that
-/// writes uses `read_settings()` and surfaces the error instead.
-fn read_settings_lossy() -> Value {
-    read_settings().unwrap_or_else(|_| json!({}))
-}
-
-fn hook_command(event: &str) -> String {
-    let exe = settings::hook_exe_path().to_string_lossy().replace('\\', "/");
-    format!("\"{exe}\" {event}")
-}
-
-fn entry_is_ours(entry: &Value) -> bool {
-    entry
-        .get("hooks")
-        .and_then(Value::as_array)
-        .map(|hooks| {
-            hooks.iter().any(|h| {
-                h.get("command")
-                    .and_then(Value::as_str)
-                    .map(|c| c.contains(MARKER))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// Settings with Coucou's hooks added; everything else is left untouched.
-fn merged(existing: &Value) -> Value {
-    let mut root = existing.as_object().cloned().unwrap_or_default();
-    let mut hooks = root
-        .get("hooks")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_else(Map::new);
-
-    for (event, timeout) in HOOK_EVENTS {
-        let mut list = hooks
-            .get(*event)
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        list.retain(|entry| !entry_is_ours(entry));
-        list.push(json!({
-            "hooks": [{
-                "type": "command",
-                "command": hook_command(event),
-                "timeout": timeout,
-            }]
-        }));
-        hooks.insert((*event).to_string(), Value::Array(list));
-    }
-
-    root.insert("hooks".into(), Value::Object(hooks));
-    Value::Object(root)
-}
-
-/// Settings with every Coucou entry removed, and nothing else changed.
-fn without_ours(existing: &Value) -> Value {
-    let mut root = existing.as_object().cloned().unwrap_or_default();
-    let Some(hooks) = root.get("hooks").and_then(Value::as_object).cloned() else {
-        return Value::Object(root);
-    };
-    let mut out = Map::new();
-    for (event, value) in hooks {
-        match value.as_array() {
-            Some(list) => {
-                let kept: Vec<Value> =
-                    list.iter().filter(|e| !entry_is_ours(e)).cloned().collect();
-                if !kept.is_empty() {
-                    out.insert(event, Value::Array(kept));
-                }
-            }
-            None => {
-                out.insert(event, value);
-            }
-        }
-    }
-    if out.is_empty() {
-        root.remove("hooks");
-    } else {
-        root.insert("hooks".into(), Value::Object(out));
-    }
-    Value::Object(root)
-}
-
-fn pretty(v: &Value) -> String {
-    serde_json::to_string_pretty(v).unwrap_or_default()
+/// For `status()` only, which must never fail loudly; anything that writes uses
+/// `read_relay()` and surfaces the error instead.
+fn read_relay_lossy() -> String {
+    read_relay().unwrap_or_default()
 }
 
 /// Down to the second: installing then uninstalling in the same minute must not
 /// quietly overwrite the first backup.
 fn stamp() -> String {
-    let t = unsafe { GetLocalTime() };
-    format!(
-        "{:04}{:02}{:02}-{:02}{:02}{:02}",
-        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
-    )
+    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
 }
 
 fn backup_path() -> PathBuf {
-    let p = settings_path();
-    p.with_file_name(format!("settings.json.bak-{}", stamp()))
+    hook_path().with_file_name(format!("coucou-relay.ts.bak-{}", stamp()))
 }
 
 /// Identifies the exact bytes a preview was computed from. FNV-1a is plenty:
@@ -220,148 +96,103 @@ fn fingerprint(bytes: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
-fn current_fingerprint() -> String {
-    match std::fs::read(settings_path()) {
-        Ok(bytes) => fingerprint(&bytes),
-        Err(_) => fingerprint(b""),
-    }
-}
-
 // ── Public API ────────────────────────────────────────────────────────────────
 
 pub fn status() -> HookStatus {
-    let current = read_settings_lossy();
-    let installed = current
-        .get("hooks")
-        .and_then(Value::as_object)
-        .map(|hooks| {
-            hooks
-                .values()
-                .filter_map(Value::as_array)
-                .flatten()
-                .any(entry_is_ours)
-        })
+    let current = read_relay_lossy();
+    let installed = !current.is_empty() && !foreign(&current);
+    let path = hook_path();
+    // The relay template ships inside this binary; the only thing that can be
+    // missing is omp itself, whose agent directory appears on first run.
+    let omp_ready = path
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .map(|d| d.exists())
         .unwrap_or(false);
-    let hook_path = settings::hook_exe_path();
     HookStatus {
         installed,
-        settings_path: settings_path().to_string_lossy().to_string(),
-        hook_ready: hook_path.exists(),
-        hook_path: hook_path.to_string_lossy().to_string(),
+        settings_path: path.display().to_string(),
+        hook_path: path.display().to_string(),
+        hook_ready: omp_ready,
     }
 }
 
 pub fn preview(install: bool) -> Result<HookPreview, String> {
-    let current = read_settings()?;
-    let next = if install { merged(&current) } else { without_ours(&current) };
+    let current = read_relay()?;
+    if foreign(&current) {
+        return Err(format!(
+            "{} exists and was not written by Coucou — Coucou won't overwrite or remove it.",
+            hook_path().display()
+        ));
+    }
+    let next = if install { RELAY } else { "" };
     Ok(HookPreview {
-        diff: unified_diff(&pretty(&current), &pretty(&next)),
-        backup: backup_path().to_string_lossy().to_string(),
-        settings_path: settings_path().to_string_lossy().to_string(),
-        fingerprint: current_fingerprint(),
+        diff: unified_diff(&current, next),
+        backup: backup_path().display().to_string(),
+        settings_path: hook_path().display().to_string(),
+        fingerprint: fingerprint(current.as_bytes()),
     })
 }
 
-/// Writes the merged (or cleaned) settings after taking a dated backup.
+/// Writes (or removes) the relay after taking a dated backup.
 ///
-/// `fingerprint` is the one the preview was computed from. If the file changed
-/// in between — another tool, another window, the user's own editor — we stop
-/// and make them look at a fresh diff, because the only thing worse than not
-/// installing the hooks is silently reverting somebody else's edit.
-pub fn write(install: bool, fingerprint: &str) -> Result<String, String> {
-    let path = settings_path();
-    let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+/// `expected` is the fingerprint the preview was computed from. If the file
+/// changed in between — another tool, another window, the user's own editor —
+/// we stop and make them look at a fresh diff, because the only thing worse
+/// than not installing the relay is silently reverting somebody else's edit.
+pub fn write(install: bool, expected: &str) -> Result<String, String> {
+    let path = hook_path();
+    let current = read_relay()?;
 
-    // Read before the backup: an unreadable file must abort before we touch
-    // anything at all.
-    let current = read_settings()?;
-    if current_fingerprint() != fingerprint {
+    if fingerprint(current.as_bytes()) != expected {
         return Err(format!(
             "{} changed since the preview. Nothing was written — review the new diff.",
             path.display()
         ));
     }
-
-    let backup = backup_path();
-    if path.exists() {
-        std::fs::copy(&path, &backup).map_err(|e| format!("backup failed: {e}"))?;
+    if foreign(&current) {
+        return Err(format!(
+            "{} was not written by Coucou — refusing to touch it.",
+            path.display()
+        ));
     }
 
-    let next = if install { merged(&current) } else { without_ours(&current) };
-    let mut text = pretty(&next);
-    text.push('\n');
+    // Back up the exact bytes the preview showed before anything changes —
+    // install and uninstall alike.
+    let mut backup = String::new();
+    if !current.is_empty() {
+        let target = backup_path();
+        std::fs::write(&target, current.as_bytes()).map_err(|e| format!("backup failed: {e}"))?;
+        backup = target.display().to_string();
+    }
+
+    if !install {
+        if current.is_empty() {
+            return Ok(backup);
+        }
+        std::fs::remove_file(&path).map_err(|e| format!("remove failed: {e}"))?;
+        return Ok(backup);
+    }
+
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
 
     // Write beside the target and rename over it: a crash or a full disk leaves
-    // the original settings.json intact rather than half a file.
-    let temp = path.with_extension(format!("json.coucou-{}", std::process::id()));
-    std::fs::write(&temp, text.as_bytes()).map_err(|e| format!("write failed: {e}"))?;
+    // the original file intact rather than half a relay.
+    let temp = dir.join(format!("coucou-relay.ts.coucou-{}", std::process::id()));
+    std::fs::write(&temp, RELAY.as_bytes()).map_err(|e| format!("write failed: {e}"))?;
     if let Err(err) = std::fs::rename(&temp, &path) {
         let _ = std::fs::remove_file(&temp);
         return Err(format!("write failed: {err}"));
     }
-    Ok(backup.to_string_lossy().to_string())
-}
-
-/// Copies coucou-hook.exe into %LOCALAPPDATA%\Coucou\bin on launch.
-/// In a bundled install it comes from the app resources; in `tauri dev` it sits
-/// next to coucou.exe in the workspace target directory.
-///
-/// Every candidate is tried rather than just the first, because getting this
-/// wrong is silent and fatal: `resources` used to be a glob, which made NSIS
-/// mirror the source path into `_up_\target\release\`, no candidate matched, and
-/// the relay was simply never installed. It only looked healthy on a developer
-/// machine, where a leftover copy from `tauri dev` was already sitting in bin/.
-pub fn ensure_hook_exe(app: &AppHandle) {
-    let dest = settings::hook_exe_path();
-    let Some(dir) = dest.parent() else { return };
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
-
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = app.path().resolve("coucou-hook.exe", tauri::path::BaseDirectory::Resource) {
-        candidates.push(p);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            // Installed build, then `tauri dev` (target/debug) next to the
-            // release hook the pre-build step produces.
-            candidates.push(parent.join("coucou-hook.exe"));
-            candidates.push(parent.join("../release/coucou-hook.exe"));
-            // Belt and braces: where the old glob form used to land it.
-            candidates.push(parent.join("_up_/target/release/coucou-hook.exe"));
-        }
-    }
-
-    let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
-    let Some(src) = candidates.into_iter().find(|p| p.exists()) else {
-        crate::log::line(format!(
-            "coucou-hook.exe not found — Claude Code hooks cannot work. Looked in: {}",
-            tried.join(", ")
-        ));
-        return;
-    };
-
-    let same = match (std::fs::metadata(&src), std::fs::metadata(&dest)) {
-        (Ok(a), Ok(b)) => a.len() == b.len() && a.modified().ok() == b.modified().ok(),
-        _ => false,
-    };
-    if same {
-        return;
-    }
-    // A hook may be running right now and hold the file open; keeping the old
-    // copy is fine, it is the same relay.
-    if let Err(err) = std::fs::copy(&src, &dest) {
-        if !dest.exists() {
-            crate::log::line(format!("could not install coucou-hook.exe: {err}"));
-        }
-    }
+    Ok(backup)
 }
 
 // ── Minimal unified diff (LCS) ────────────────────────────────────────────────
 
-/// settings.json is short, so a plain O(n·m) LCS is the simplest honest diff.
+/// The relay file is small enough that a plain O(n·m) LCS is the simplest
+/// honest diff.
 fn unified_diff(before: &str, after: &str) -> String {
     let a: Vec<&str> = before.lines().collect();
     let b: Vec<&str> = after.lines().collect();
@@ -439,71 +270,6 @@ fn unified_diff(before: &str, after: &str) -> String {
 mod tests {
     use super::*;
 
-    const WHERE: &str = "settings.json";
-
-    #[test]
-    fn a_utf8_bom_is_stripped_not_treated_as_corruption() {
-        // PowerShell 5's `Set-Content -Encoding utf8` produces exactly this.
-        let mut bytes = vec![0xEF, 0xBB, 0xBF];
-        bytes.extend_from_slice(br#"{"model":"opus","hooks":{}}"#);
-        let parsed = parse_settings(&bytes, WHERE).expect("a BOM must not defeat the parser");
-        assert_eq!(parsed["model"], "opus");
-    }
-
-    #[test]
-    fn unreadable_content_is_an_error_never_an_empty_object() {
-        // This is the whole bug: returning {} here meant `merged()` produced a
-        // file containing nothing but Coucou's hooks, and the write replaced
-        // everything the user had.
-        for bad in [&b"{ not json"[..], &b"[1,2,3]"[..], &b"\"a string\""[..]] {
-            assert!(
-                parse_settings(bad, WHERE).is_err(),
-                "content we cannot use must refuse, not come back empty"
-            );
-        }
-    }
-
-    #[test]
-    fn empty_and_whitespace_files_start_from_nothing() {
-        assert_eq!(parse_settings(b"", WHERE).unwrap(), json!({}));
-        assert_eq!(parse_settings(b"  
-	 ", WHERE).unwrap(), json!({}));
-    }
-
-    #[test]
-    fn merging_keeps_every_other_setting_and_every_foreign_hook() {
-        let existing = serde_json::json!({
-            "model": "claude-opus-5",
-            "theme": "dark",
-            "enabledPlugins": ["a", "b"],
-            "hooks": {
-                "PreToolUse": [
-                    { "hooks": [{ "type": "command", "command": "someone-elses-tool.exe" }] }
-                ],
-                "SomeEventWeDoNotTouch": [
-                    { "hooks": [{ "type": "command", "command": "keep-me.exe" }] }
-                ]
-            }
-        });
-
-        let after = merged(&existing);
-        assert_eq!(after["model"], "claude-opus-5");
-        assert_eq!(after["theme"], "dark");
-        assert_eq!(after["enabledPlugins"], serde_json::json!(["a", "b"]));
-
-        let pre = after["hooks"]["PreToolUse"].as_array().unwrap();
-        assert!(
-            pre.iter().any(|e| serde_json::to_string(e).unwrap().contains("someone-elses-tool.exe")),
-            "another tool's hook was dropped"
-        );
-        assert!(pre.iter().any(entry_is_ours), "our own hook was not added");
-        assert!(after["hooks"]["SomeEventWeDoNotTouch"].is_array());
-
-        // And removing ours puts it back exactly as it was.
-        let cleaned = without_ours(&after);
-        assert_eq!(cleaned, existing);
-    }
-
     #[test]
     fn a_fingerprint_notices_any_change() {
         assert_eq!(fingerprint(b"{}"), fingerprint(b"{}"));
@@ -511,54 +277,72 @@ mod tests {
         assert_ne!(fingerprint(b""), fingerprint(b"{}"));
     }
 
-    /// Everything filesystem-shaped lives in one test on purpose: it points
-    /// USERPROFILE at a temp directory, and that is process-wide.
     #[test]
-    fn writing_backs_up_preserves_and_refuses_a_changed_file() {
+    fn a_foreign_file_is_never_previewed_nor_written() {
+        // Pure logic, no filesystem: the preview path refuses before it ever
+        // computes a diff, and write refuses even with a matching fingerprint.
+        // Absent (empty) is not foreign — there is simply nothing there yet.
+        assert!(!foreign(""));
+        assert!(!foreign(MARKER));
+        assert!(foreign("// somebody else's relay\n"));
+        assert!(!foreign("// header\n// coucou-relay v1\n"));
+    }
+
+    /// Everything filesystem-shaped lives in one test on purpose: it points
+    /// HOME at a temp directory, and that is process-wide.
+    #[test]
+    fn install_backs_up_edits_and_uninstalls_cleanly() {
         let tmp = std::env::temp_dir().join(format!("coucou-hooks-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join(".claude")).unwrap();
-        std::env::set_var("USERPROFILE", &tmp);
+        // The agent dir existing is what "omp has run before" means for status.
+        std::fs::create_dir_all(tmp.join(".omp").join("agent")).unwrap();
+        std::env::set_var("HOME", &tmp);
 
-        let path = settings_path();
+        let path = hook_path();
         assert!(path.starts_with(&tmp), "the test must not touch the real home");
 
-        // A real-shaped file, written the way PowerShell 5 would: UTF-8 with BOM.
-        let original = r#"{"model":"claude-opus-5","theme":"dark","tui":{"x":1},"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"other-tool.exe"}]}]}}"#;
-        let mut bytes = vec![0xEF, 0xBB, 0xBF];
-        bytes.extend_from_slice(original.as_bytes());
-        std::fs::write(&path, &bytes).unwrap();
+        // Fresh install: nothing present, omp ready.
+        let st = status();
+        assert!(!st.installed, "nothing is installed yet");
+        assert!(st.hook_ready, "the agent directory exists");
 
-        // Install.
-        let plan = preview(true).expect("a BOM must not stop the preview");
-        assert!(plan.diff.contains("coucou-hook"), "the diff must show what changes");
-        let backup = write(true, &plan.fingerprint).expect("install should succeed");
-
-        // The backup holds the original bytes, BOM and all.
-        assert_eq!(std::fs::read(&backup).unwrap(), bytes);
-
-        // Everything else survived, and so did the other tool's hook.
-        let after: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(after["model"], "claude-opus-5");
-        assert_eq!(after["theme"], "dark");
-        assert_eq!(after["tui"]["x"], 1);
-        let pre = after["hooks"]["PreToolUse"].as_array().unwrap();
-        assert!(pre.iter().any(|e| serde_json::to_string(e).unwrap().contains("other-tool.exe")));
+        // Install: the diff must show what will be written, and the write must
+        // produce byte-identical relay source.
+        let plan = preview(true).expect("a fresh preview must succeed");
+        assert!(plan.diff.contains(MARKER), "the diff must show our own bytes");
+        let backup = write(true, &plan.fingerprint).expect("fresh install must succeed");
+        assert_eq!(backup, "", "nothing existed, so nothing to back up");
         assert!(status().installed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), RELAY);
 
-        // A file that moved since the preview is refused, and left alone.
+        // Re-installing over our own file backs the previous copy up first.
+        let plan = preview(true).unwrap();
+        let backup = write(true, &plan.fingerprint).expect("reinstall must succeed");
+        assert!(!backup.is_empty(), "the old copy must be backed up");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), RELAY);
+
+        // An edit since the preview is refused, and the file is left alone.
         let stale = preview(false).unwrap();
-        std::fs::write(&path, br#"{"model":"someone-else-edited-this"}"#).unwrap();
+        std::fs::write(&path, format!("{MARKER}\ndrifted\n")).unwrap();
         let err = write(false, &stale.fingerprint).unwrap_err();
         assert!(err.contains("changed since the preview"), "got: {err}");
-        let untouched: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(untouched["model"], "someone-else-edited-this");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("drifted"));
 
-        // Content we cannot parse is refused before anything is written.
-        std::fs::write(&path, b"{ broken").unwrap();
-        assert!(preview(true).is_err());
+        // A foreign file at our path is refused by preview and by write.
+        std::fs::write(&path, "// somebody else's relay\n").unwrap();
+        let err = preview(true).unwrap_err();
+        assert!(err.contains("not written by Coucou"), "got: {err}");
         assert!(write(true, "whatever").is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), b"{ broken");
+        assert!(preview(false).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "// somebody else's relay\n");
+
+        // Uninstall removes exactly our file and reports not-installed after.
+        std::fs::write(&path, RELAY).unwrap();
+        let plan = preview(false).unwrap();
+        assert!(plan.diff.contains('-'), "uninstall diff must show removals");
+        write(false, &plan.fingerprint).expect("uninstall must succeed");
+        assert!(!path.exists(), "our own file is gone");
+        assert!(!status().installed);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
