@@ -146,10 +146,11 @@ not built here; upstream remains the source for those platforms.
 
 | Works | Not yet |
 | --- | --- |
-| Island, Mochi, tray, settings window | Approve/deny from the island (the decision stays in the terminal; the island only shows that omp is waiting) |
-| Live session events (start, prompt, tools, stop) | Per-session task rows (all sessions share one row) |
-| Chat (own Anthropic key), integration pills | The app does not install the KWin rule itself |
-| Hook install with preview/backup/fingerprint | macOS/Windows builds of *this* fork |
+| Island, Mochi, tray, settings window | Per-session task rows (all sessions share one row) |
+| Live session events (start, prompt, tools, stop) | The app does not install the KWin rule itself |
+| **Approve/deny from the island (Allow/Deny card)** | macOS/Windows builds of *this* fork |
+| Chat (own Anthropic key), integration pills | |
+| Hook install with preview/backup/fingerprint | |
 
 ```bash
 cd windows
@@ -191,6 +192,22 @@ positionrule=2
 follow the pointer inside the window only, from DOM mouse events), no
 click-through shape test (the window rect takes the mouse), and the "Display
 under the cursor" setting falls back to the primary display.
+
+**Approval.** OMP has no API to answer its approval gate from outside, and its
+default mode is `yolo` — the terminal never prompts. The relay therefore *adds*
+the ask the terminal would not make, and stays out of the way otherwise:
+
+- Asked only for `bash`, `write`, `edit`, `task`, `computer`, `browser`, and
+  only in interactive sessions (`ctx.hasUI`) — a print run never stalls.
+- Asked only while `tools.approvalMode` is `yolo` (the default) and the tool
+  has no explicit `tools.approval.<tool>` entry. Any other mode or an explicit
+  policy leaves the decision to the terminal exactly as configured — asking in
+  both places would be worse than asking in neither.
+- The card holds the call open for 108 s. **Only an explicit Deny blocks the
+  tool.** No answer — island paused, Coucou closed, timeout — runs the tool,
+  because the absence of an answer never blocks the agent and the configured
+  baseline already allows it. If you want a hard floor, set
+  `tools.approvalMode: write` and let the terminal own the asks.
 
 ## Contributing
 
