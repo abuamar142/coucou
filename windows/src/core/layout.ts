@@ -12,14 +12,9 @@ export type IslandViewName =
   | "error"
   | "finished"
   | "confused"
-  | "upload"
-  | "uploading"
-  | "choose"
   | "mail"
-  | "prompt"
   | "searching"
   | "result"
-  | "note"
   | "settings"
   | "greeting";
 
@@ -74,34 +69,14 @@ export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
   error: { height: 160, botX: 62, botY: null, botDiameter: 58, agentMode: "column" },
   finished: { height: 160, botX: 62, botY: null, botDiameter: 58, agentMode: "column" },
   confused: { height: 160, botX: 76, botY: null, botDiameter: 66, agentMode: "column" },
-  upload: { height: 176, botX: 140, botY: 104, botDiameter: 62, agentMode: "column" },
-  // botY 103 = bar top (42 + 58) + 3, so the dot really rides the bar. The Swift
-  // layout says 118 while its own comment says 103; the comment matches the spec.
-  uploading: { height: 176, botX: 46, botY: 103, botDiameter: 20, agentMode: "none" },
-  choose: { height: 176, botX: 60, botY: 101, botDiameter: 52, agentMode: "column" },
   mail: { height: 240, botX: 56, botY: null, botDiameter: 46, agentMode: "column" },
-  prompt: { height: 160, botX: 52, botY: null, botDiameter: 44, agentMode: "column" },
   searching: { height: 160, botX: 52, botY: null, botDiameter: 44, agentMode: "column" },
   result: { height: 160, botX: 52, botY: null, botDiameter: 44, agentMode: "column" },
-  note: { height: 160, botX: 60, botY: null, botDiameter: 50, agentMode: "column" },
   settings: { height: 160, botX: 54, botY: null, botDiameter: 46, agentMode: "none" },
   greeting: { height: 150, botX: 320, botY: 90, botDiameter: 0, agentMode: "none" },
 };
 
-// The upload views above are only the fallback geometry. Once a file is actually
-// dropped the whole sequence — Mochi included — is drawn by src/upload, which
-// owns its own constants (USC) straight from UploadSequenceEngine.swift.
-
-/** Chat view grows with the conversation — IslandContainer.chatPromptHeight. */
-export function chatPromptHeight(messageCount: number): number {
-  return Math.min(300, 240 + messageCount * 40);
-}
-
-export function islandSize(
-  mode: IslandMode,
-  view: IslandViewName,
-  chatCount = 0,
-): { w: number; h: number } {
+export function islandSize(mode: IslandMode, _view: IslandViewName): { w: number; h: number } {
   switch (mode) {
     case "hidden":
       // No notch to hide inside on a PC: the island retracts to zero height and
@@ -109,10 +84,8 @@ export function islandSize(
       return { w: NOTCH_W, h: 0 };
     case "compact":
       return { w: COMPACT_W, h: NOTCH_H };
-    case "expanded": {
-      const h = view === "prompt" ? chatPromptHeight(chatCount) : VIEW_LAYOUTS[view].height;
-      return { w: EXPANDED_W, h };
-    }
+    case "expanded":
+      return { w: EXPANDED_W, h: VIEW_LAYOUTS[_view].height };
   }
 }
 
@@ -128,7 +101,6 @@ export function botPosition(
   mode: IslandMode,
   view: IslandViewName,
   islandH: number,
-  uploadProgress = 0,
 ): BotPlacement {
   switch (mode) {
     case "hidden":
@@ -137,14 +109,6 @@ export function botPosition(
       return { cx: 40, cy: 16, diameter: 20, opacity: 1 };
     case "expanded": {
       const layout = VIEW_LAYOUTS[view];
-      if (view === "uploading") {
-        return {
-          cx: 36 + uploadProgress * 526,
-          cy: layout.botY ?? 103,
-          diameter: layout.botDiameter,
-          opacity: 1,
-        };
-      }
       if (layout.botY != null) {
         return { cx: layout.botX, cy: layout.botY, diameter: layout.botDiameter, opacity: 1 };
       }

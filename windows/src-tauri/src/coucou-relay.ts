@@ -1,13 +1,13 @@
 // coucou-relay v1 — Coucou's omp hook. Forwards session events to the island
 // over a Unix socket; nothing ever blocks the session.
 //
-// Wire: one JSON line per event shaped like a Claude Code hook payload
-// ({ "hook_event_name": ... }) — the island front end speaks that shape
-// natively, so no per-agent special casing exists anywhere.
+// Wire: one JSON line per event carrying { "hook_event_name": SessionStart,
+// PreToolUse, PermissionRequest, … } — the vocabulary the island front end
+// already speaks, so no per-agent special casing exists anywhere.
 //
 // Budgets: 300 ms to connect. Coucou closed → the connect fails immediately
-// (ENOENT/ECONNREFUSED) → one dropped event, omp carries on untouched. Same
-// rule as the old coucou-hook.exe: never make the agent wait for us.
+// (ENOENT/ECONNREFUSED) → one dropped event, omp carries on untouched. A relay
+// that cannot send must be invisible to the session.
 //
 // Approval (the island's Allow/Deny):
 //   * Asked only when omp itself would NOT have asked: tools.approvalMode is

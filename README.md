@@ -149,8 +149,12 @@ not built here; upstream remains the source for those platforms.
 | Island, Mochi, tray, settings window | Per-session task rows (all sessions share one row) |
 | Live session events (start, prompt, tools, stop) | The app does not install the KWin rule itself |
 | **Approve/deny from the island (Allow/Deny card)** | macOS/Windows builds of *this* fork |
-| Chat (own Anthropic key), integration pills | |
+| Integration pills (Stripe, GitHub, Vercel, …) | |
 | Hook install with preview/backup/fingerprint | |
+
+Upstream's in-island chat (Anthropic API) and the drop-file-to-ask flow are
+intentionally removed here: this fork talks to omp and nothing else. The
+upstream sections above still describe them for macOS/Windows.
 
 ```bash
 cd windows

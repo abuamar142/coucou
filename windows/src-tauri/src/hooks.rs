@@ -4,7 +4,7 @@
 // ~/.omp/agent/hooks/post/coucou-relay.ts (ambient discovery scans
 // <agentDir>/hooks/pre|post/*.ts — see docs/hooks.md in the omp repo). There is
 // no JSON to merge: the file is Coucou's by construction, so the contract is
-// simpler than the Claude Code installer this replaced — read the target, take
+// simpler than the settings.json merger this replaced — read the target, take
 // a dated backup, show the exact bytes that will change, write only after an
 // explicit click, and refuse to touch a file we did not write.
 
